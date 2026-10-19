@@ -362,14 +362,34 @@ fn require_valid_role_address(env: &Env, address: &Address) -> Result<(), Contra
 pub(crate) fn create_raffle_internal(
     env: &Env,
     creator: Address,
-    config: RaffleConfig,
+    mut config: RaffleConfig,
 ) -> Result<Address, ContractError> {
+    // Validate before deployment or any category-index storage is touched.
+    config.category = raffle_shared::config_builder::normalize_category(env, &config.category)
+        .map_err(|_| ContractError::InvalidParameters)?;
     let admin: Address = env
         .storage()
         .persistent()
         .get(&DataKey::Admin)
         .ok_or(ContractError::NotAuthorized)?;
     let factory_address = env.current_contract_address();
+
+    // Keep the lifetime track record separate from the creator index, which
+    // is pruned when old raffles are cleaned up. Check before deploying so an
+    // overflowing count cannot leave a partially created raffle.
+    let mut profile: CreatorProfile = env
+        .storage()
+        .persistent()
+        .get(&DataKey::CreatorProfile(creator.clone()))
+        .unwrap_or(CreatorProfile {
+            name: String::from_str(env, ""),
+            verified: false,
+            raffles_created: 0,
+        });
+    profile.raffles_created = profile
+        .raffles_created
+        .checked_add(1)
+        .ok_or(ContractError::ArithmeticOverflow)?;
 
     #[cfg(not(test))]
     let raffle_address = {
@@ -439,6 +459,9 @@ pub(crate) fn create_raffle_internal(
         .get(&DataKey::CreatorRaffles(creator.clone()))
         .unwrap_or_else(|| Vec::new(env));
     creator_raffles.push_back(raffle_address.clone());
+    env.storage()
+        .persistent()
+        .set(&DataKey::CreatorProfile(creator.clone()), &profile);
     env.storage()
         .persistent()
         .set(&DataKey::CreatorRaffles(creator), &creator_raffles);

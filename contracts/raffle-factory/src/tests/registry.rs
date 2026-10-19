@@ -1,6 +1,89 @@
 use super::*;
 
 #[test]
+fn profile_track_record_counts_creations_and_survives_profile_updates() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _treasury) = setup_factory(&env);
+    let creator = Address::generate(&env);
+    let other_creator = Address::generate(&env);
+    let token = make_token(&env);
+
+    assert_eq!(client.get_profile(&creator).raffles_created, 0);
+    client.create_raffle(&creator, &rate_limit_config(&env, &token, "first"));
+    let profile = client.get_profile(&creator);
+    assert_eq!(profile.raffles_created, 1);
+    assert_eq!(profile.name, String::from_str(&env, ""));
+    assert!(!profile.verified);
+
+    client.set_profile_name(&creator, &String::from_str(&env, "Original name"));
+    client.set_verified(&creator, &true);
+    client.create_raffle(&creator, &rate_limit_config(&env, &token, "second"));
+    assert_eq!(client.get_profile(&creator).raffles_created, 2);
+
+    let renamed = String::from_str(&env, "Updated name");
+    client.set_profile_name(&creator, &renamed);
+    let profile = client.get_profile(&creator);
+    assert_eq!(profile.raffles_created, 2);
+    assert_eq!(profile.name, renamed);
+    assert!(profile.verified);
+
+    client.set_verified(&creator, &false);
+    assert_eq!(client.get_profile(&creator).raffles_created, 2);
+    assert_eq!(client.get_profile(&other_creator).raffles_created, 0);
+}
+
+#[test]
+fn profile_track_record_counts_recurring_rounds_only_when_deployed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let (client, _admin, _treasury) = setup_factory(&env);
+    let creator = Address::generate(&env);
+    let token = make_token(&env);
+    let recurring_id = client.create_recurring_raffle(
+        &creator,
+        &recurring_config(&env, valid_base_config(&env, &token)),
+    );
+    assert_eq!(client.get_profile(&creator).raffles_created, 0);
+
+    for round in 1..=2u32 {
+        env.ledger().set_timestamp(1_000_000 + 86_400 * round as u64);
+        client.trigger_next_round(&recurring_id);
+        assert_eq!(client.get_profile(&creator).raffles_created, round);
+    }
+}
+
+#[test]
+fn profile_track_record_overflow_rejects_before_creation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _treasury) = setup_factory(&env);
+    let creator = Address::generate(&env);
+    let token = make_token(&env);
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(
+            &DataKey::CreatorProfile(creator.clone()),
+            &CreatorProfile {
+                name: String::from_str(&env, "Established creator"),
+                verified: true,
+                raffles_created: u32::MAX,
+            },
+        );
+    });
+
+    assert_eq!(
+        client.try_create_raffle(&creator, &rate_limit_config(&env, &token, "overflow")),
+        Err(Ok(ContractError::ArithmeticOverflow))
+    );
+    assert_eq!(client.get_profile(&creator).raffles_created, u32::MAX);
+    env.as_contract(&client.address, || {
+        assert!(!env.storage().persistent().has(&DataKey::RaffleInstancesCount));
+        assert!(!env.storage().persistent().has(&DataKey::CreatorRaffles(creator)));
+    });
+}
+
+#[test]
 fn test_get_raffles_by_creator_empty() {
     let env = Env::default();
     env.mock_all_auths();

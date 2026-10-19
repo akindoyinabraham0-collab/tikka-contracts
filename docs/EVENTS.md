@@ -885,19 +885,19 @@ Topic: `tikka:ticket_gifted`
 
 ## TicketNftMinted
 
-Emitted once per NFT receipt is successfully minted by the configured `nft_contract`.
+Emitted once per ticket after the configured `nft_contract` successfully mints its receipt. A failed mint rolls back the entire purchase, including payment, prior mints, and events. NFT purchases are capped at `MAX_NFT_TICKETS_PER_TX` (10) tickets per transaction.
 
 Topic: `tikka:ticket_nft_minted`
 
 | Field          | Type      | Flags | Description                                           |
 | -------------- | --------- | ----- | ----------------------------------------------------- |
-| `recipient`    | `Address` |       | The address that received the NFT (the ticket buyer). |
+| `recipient`    | `Address` |       | The ticket owner receiving the NFT (the recipient for gift purchases). |
 | `ticket_id`    | `u32`     |       | The ticket ID within this raffle (1-indexed).         |
 | `raffle_id`    | `Address` |       | The raffle instance contract address (NFT namespace). |
 | `nft_contract` | `Address` |       | The NFT contract that performed the mint.             |
 | `timestamp`    | `u64`     |       | Ledger timestamp of the mint.                         |
 
-**Emitted by:** _(no live call sites — defined but not currently published)_
+**Emitted by:** `buy_tickets`, `buy_tickets_for`
 
 ---
 

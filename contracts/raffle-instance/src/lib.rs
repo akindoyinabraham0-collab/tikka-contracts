@@ -64,7 +64,7 @@ use crate::events::{
     FeesWithdrawn, MetadataHashUpdated, OracleAddressUpdated, OracleSeedDelivered, PrizeClaimed,
     PrizeDeposited, PrizeRefunded, ProtocolFeeUpdated, RaffleCancelled, RaffleCreated,
     RaffleFailed, RaffleFinalized, RaffleStatusChanged, RandomnessFallbackTriggered,
-    RandomnessReceived, RandomnessRequested, StorageWiped, SwapDeadlineUpdated, TicketNftMinted,
+    RandomnessReceived, RandomnessRequested, StorageWiped, SwapDeadlineUpdated,
     TicketPurchased, TicketRefunded, TicketSalesPaused, TicketSalesResumed, TokensRescued,
     WinnerDrawn,
 };
@@ -115,6 +115,8 @@ impl MockFactory {
 pub struct Raffle {
     pub creator: Address,
     pub description: String,
+    /// Validated category, normalized to lowercase ASCII at initialization.
+    pub category: Option<String>,
     /// Unix timestamp after which ticket sales close and `finalize_raffle`
     /// may transition the raffle out of `Active`. The boundary is exclusive:
     /// sales are open while `ledger_timestamp < end_time`, and the deadline
@@ -297,7 +299,7 @@ pub enum Error {
     InvalidEndTime = 62,
     InvalidAdminAddress = 63,
     RandomnessTooEarly = 64,
-    CancelTimelockActive = 67,
+    CancelTimelockActive = 65,
     CancelNotScheduled = 66,
     ExceedsMaxTicketsPerAddress = 67,
     OracleNotRegistered = 68,
@@ -365,8 +367,15 @@ impl RaffleInstance {
         factory: Address,
         admin: Address,
         creator: Address,
-        config: RaffleConfig,
+        mut config: RaffleConfig,
     ) -> Result<(), Error> {
+        config.category = raffle_shared::config_builder::normalize_category(&env, &config.category)
+            .map_err(|_| Error::InvalidParameters)?;
+        raffle_shared::config_builder::validate_nft_config(
+            &config,
+            Some(&env.current_contract_address()),
+        )
+        .map_err(|_| Error::InvalidParameters)?;
         if config.description.len() > MAX_DESCRIPTION_LENGTH {
             return Err(Error::InvalidParameters);
         }
@@ -538,6 +547,7 @@ if config.randomness_source == RandomnessSource::External {
         let raffle = Raffle {
             creator: creator.clone(),
             description: config.description.clone(),
+            category: config.category.clone(),
             end_time: config.end_time,
             no_deadline: config.no_deadline,
             max_tickets: config.max_tickets,

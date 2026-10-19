@@ -2,9 +2,8 @@
 //! [`crate::NftTicketTrait`]. See issue #635.
 //!
 //! These tests exercise the trait/client boundary directly with a mock NFT
-//! contract — they do not exercise `raffle-instance`'s purchase flow (which,
-//! as of this writing, does not yet invoke the hook; see the rustdoc on
-//! `NftTicketTrait` for the documented contract this test suite pins).
+//! contract. Purchase-flow integration coverage lives in raffle-instance's
+//! NFT receipt tests; this suite pins the client-level failure semantics.
 
 #![cfg(test)]
 

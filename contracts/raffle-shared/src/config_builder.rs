@@ -434,7 +434,8 @@ pub fn validate_config(
     if config.metadata_hash == BytesN::from_array(env, &[0u8; 32]) {
         return Err(invalid());
     }
-    validate_category(&config.category)?;
+    config.category = normalize_category(env, &config.category)?;
+    validate_nft_config(config, instance_address)?;
 
     let token_client = token::Client::new(env, &config.payment_token);
     let _ = token_client
@@ -461,9 +462,14 @@ pub fn validate_config(
     Ok(())
 }
 
-fn validate_category(category: &Option<String>) -> Result<(), ConfigValidationError> {
+/// Validate a category before indexing or persisting it, using ASCII lowercase
+/// as the canonical representation. `None` denotes an uncategorized raffle.
+pub fn normalize_category(
+    env: &Env,
+    category: &Option<String>,
+) -> Result<Option<String>, ConfigValidationError> {
     let Some(category) = category else {
-        return Ok(());
+        return Ok(None);
     };
     let length = category.len();
     if length == 0 || length > MAX_CATEGORY_LENGTH {
@@ -477,6 +483,25 @@ fn validate_category(category: &Option<String>) -> Result<(), ConfigValidationEr
         .any(|byte| !byte.is_ascii_alphanumeric() && *byte != b'-')
     {
         return Err(ConfigValidationError::InvalidParameters);
+    }
+    slice.make_ascii_lowercase();
+    Ok(Some(String::from_bytes(env, slice)))
+}
+
+/// Validate the optional NFT receipt target without calling a mutating mint hook.
+/// This checks deployment, not interface compatibility: a later mint failure
+/// deliberately rolls back the entire purchase.
+pub fn validate_nft_config(
+    config: &RaffleConfig,
+    instance_address: Option<&Address>,
+) -> Result<(), ConfigValidationError> {
+    if let Some(address) = &config.nft_contract {
+        if instance_address == Some(address)
+            || !matches!(address.executable(), Some(soroban_sdk::Executable::Wasm(_)))
+            || config.max_tickets_per_tx > crate::constants::MAX_NFT_TICKETS_PER_TX
+        {
+            return Err(ConfigValidationError::InvalidParameters);
+        }
     }
     Ok(())
 }
@@ -496,5 +521,53 @@ mod tests {
             .build();
 
         assert_eq!(result, Err(ConfigValidationError::InvalidParameters));
+    }
+
+    #[test]
+    fn category_normalizes_ascii_case_and_preserves_allowed_characters() {
+        let env = Env::default();
+        assert_eq!(normalize_category(&env, &None), Ok(None));
+        assert_eq!(
+            normalize_category(&env, &Some(String::from_str(&env, "GaMiNg-2026"))),
+            Ok(Some(String::from_str(&env, "gaming-2026")))
+        );
+        let maximum = [b'A'; MAX_CATEGORY_LENGTH as usize];
+        assert_eq!(
+            normalize_category(&env, &Some(String::from_bytes(&env, &maximum))),
+            Ok(Some(String::from_bytes(
+                &env,
+                &[b'a'; MAX_CATEGORY_LENGTH as usize],
+            )))
+        );
+    }
+
+    #[test]
+    fn category_rejects_empty_overlength_whitespace_and_non_ascii() {
+        let env = Env::default();
+        for value in ["", "game night", " gaming", "gaming ", "game_night", "art/print", "caf\u{00e9}"] {
+            assert_eq!(
+                normalize_category(&env, &Some(String::from_str(&env, value))),
+                Err(ConfigValidationError::InvalidParameters)
+            );
+        }
+        assert_eq!(
+            normalize_category(
+                &env,
+                &Some(String::from_bytes(&env, &[b'a'; MAX_CATEGORY_LENGTH as usize + 1])),
+            ),
+            Err(ConfigValidationError::InvalidParameters)
+        );
+    }
+
+    #[test]
+    fn builder_stores_normalized_category() {
+        let env = Env::default();
+        let token_admin = Address::generate(&env);
+        let payment_token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let config = RaffleConfigBuilder::new(&env, payment_token)
+            .category(Some(String::from_str(&env, "ArT-2026")))
+            .build()
+            .unwrap();
+        assert_eq!(config.category, Some(String::from_str(&env, "art-2026")));
     }
 }

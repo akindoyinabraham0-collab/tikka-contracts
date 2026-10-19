@@ -39,9 +39,9 @@ use soroban_sdk::{
     token, Address, BytesN, Env, IntoVal, Symbol, Val, Vec,
 };
 
-use raffle_shared::{apply_bp, RandomnessSource, Ticket};
+use raffle_shared::{constants::MAX_NFT_TICKETS_PER_TX, NftTicketClient, RandomnessSource, Ticket};
 
-use crate::events::{DrawTriggered, RandomnessRequested, TicketPurchased};
+use crate::events::{DrawTriggered, RandomnessRequested, TicketNftMinted, TicketPurchased};
 use crate::helpers::{
     bump_raffle_ttl, calculate_buy_quote, Guard, request_randomness, require_not_paused,
     transition_to_drawing,
@@ -62,7 +62,9 @@ fn validate_purchase_preconditions(env: &Env, raffle: &Raffle, quantity: u32) ->
     if quantity == 0 {
         return Err(Error::InvalidQuantity);
     }
-    if quantity > raffle.max_tickets_per_tx {
+    if quantity > raffle.max_tickets_per_tx
+        || (raffle.nft_contract.is_some() && quantity > MAX_NFT_TICKETS_PER_TX)
+    {
         return Err(Error::ExceedsMaxTicketsPerTx);
     }
     require_not_paused(env)?;
@@ -100,7 +102,9 @@ fn validate_purchase_preconditions(env: &Env, raffle: &Raffle, quantity: u32) ->
 ///    [`Error::ExceedsMaxTicketsPerAddress`].
 /// 7. Performs a double-read concurrency guard (snapshot vs. persisted state).
 /// 8. Writes each [`Ticket`] to persistent storage under
-///    [`DataKey::Ticket(id)`](crate::DataKey::Ticket).
+///    [`DataKey::Ticket(id)`](crate::DataKey::Ticket) and mints its NFT
+///    receipt when configured. NFT batches are capped at
+///    [`MAX_NFT_TICKETS_PER_TX`]; a mint failure aborts the entire purchase.
 /// 9. Charges `ticket_price * quantity` and the protocol fee from the
 ///    buyer; the fee accrues for withdrawal after finalization.
 /// 10. If the purchase fills the raffle, calls [`transition_to_drawing`] and
@@ -153,6 +157,7 @@ fn validate_purchase_preconditions(env: &Env, raffle: &Raffle, quantity: u32) ->
 /// # Events
 ///
 /// - [`events::TicketPurchased`] — always emitted on success.
+/// - [`events::TicketNftMinted`] — once per ticket when NFTs are configured.
 /// - [`events::DrawTriggered`] — emitted when the purchase fills the raffle.
 /// - [`events::RandomnessRequested`] — emitted when `External` randomness is
 ///   requested after a sell-out.
@@ -160,6 +165,7 @@ fn validate_purchase_preconditions(env: &Env, raffle: &Raffle, quantity: u32) ->
 /// See also: [`docs/EVENTS.md`](../../../docs/EVENTS.md) —
 /// `TicketPurchased`, `DrawTriggered`, `RandomnessRequested`.
 pub(crate) fn buy_tickets(env: Env, buyer: Address, quantity: u32) -> Result<u32, Error> {
+    let _guard = Guard::new(&env)?;
     buyer.require_auth();
     let mut raffle = crate::read_raffle(&env)?;
     validate_purchase_preconditions(&env, &raffle, quantity)?;
@@ -272,6 +278,7 @@ pub(crate) fn buy_tickets(env: Env, buyer: Address, quantity: u32) -> Result<u32
         env.storage()
             .persistent()
             .set(&DataKey::Ticket(ticket_id), &ticket);
+        mint_ticket_receipt(&env, &raffle, &buyer, ticket_id, timestamp);
         ticket_ids.push_back(ticket_id);
     }
 
@@ -361,12 +368,9 @@ pub(crate) fn buy_tickets(env: Env, buyer: Address, quantity: u32) -> Result<u32
 /// Shares most of [`buy_tickets`]'s validation, fee model, and automatic
 /// draw trigger — except `recipient` (not `buyer`) is the address credited
 /// with owning the tickets and checked against `max_tickets_per_address` /
-/// `allow_multiple`; `buyer` still pays and must authorize the call. Unlike
-/// [`buy_tickets`], this function does **not** check the factory-level
-/// global pause flag (`require_global_not_paused`) — only the per-raffle
-/// `ticket_sales_paused` flag is enforced here. This is pre-existing
-/// behavior, not part of the `end_time` fix below; see the raffle-wide
-/// pause note under `# Errors`.
+/// `allow_multiple`; `buyer` still pays and must authorize the call. Any
+/// configured NFT receipts are minted to `recipient` atomically with the
+/// purchase, subject to [`MAX_NFT_TICKETS_PER_TX`].
 ///
 /// # Auth
 ///
@@ -385,8 +389,7 @@ pub(crate) fn buy_tickets(env: Env, buyer: Address, quantity: u32) -> Result<u32
 ///
 /// # Errors
 ///
-/// Same error set as [`buy_tickets`] (minus the global-pause case noted
-/// above), with per-address checks evaluated against `recipient` instead of
+/// Same error set as [`buy_tickets`], with per-address checks evaluated against `recipient` instead of
 /// `buyer`. Notably:
 ///
 /// - [`Error::RaffleExpired`] — deadline passed and `no_deadline` is false.
@@ -407,7 +410,9 @@ pub(crate) fn buy_tickets_for(env: Env, buyer: Address, recipient: Address, quan
         return Err(Error::InvalidQuantity);
     }
     let mut raffle = crate::read_raffle(&env)?;
-    if quantity > raffle.max_tickets_per_tx {
+    if quantity > raffle.max_tickets_per_tx
+        || (raffle.nft_contract.is_some() && quantity > MAX_NFT_TICKETS_PER_TX)
+    {
         return Err(Error::ExceedsMaxTicketsPerTx);
     }
     buyer.require_auth();
@@ -457,18 +462,6 @@ pub(crate) fn buy_tickets_for(env: Env, buyer: Address, recipient: Address, quan
     }
 
     let timestamp = env.ledger().timestamp();
-        fix/security-checks-effects-763
-    let ticket_total = raffle
-        .ticket_price
-        .checked_mul(quantity as i128)
-        .ok_or(Error::ArithmeticOverflow)?;
-    let protocol_fee = apply_bp(ticket_total, raffle.protocol_fee_bp)
-        .ok_or(Error::ArithmeticOverflow)?;
-
-    let total_price = ticket_total
-        .checked_add(protocol_fee)
-        .ok_or(Error::ArithmeticOverflow)?;
-        master
     let quote = calculate_buy_quote(&raffle, quantity)?;
     let total_price = quote.net_to_pay;
     let protocol_fee = quote.fee;
@@ -547,6 +540,7 @@ pub(crate) fn buy_tickets_for(env: Env, buyer: Address, recipient: Address, quan
         env.storage()
             .persistent()
             .set(&DataKey::Ticket(ticket_id), &ticket);
+        mint_ticket_receipt(&env, &raffle, &recipient, ticket_id, timestamp);
         ticket_ids.push_back(ticket_id);
     }
 
@@ -629,6 +623,23 @@ pub(crate) fn buy_tickets_for(env: Env, buyer: Address, recipient: Address, quan
 
     Ok(raffle.tickets_sold)
 }
+/// Mint a receipt atomically with its ticket. A failed mint deliberately aborts
+/// the purchase, including payment, earlier mints, state changes, and events.
+fn mint_ticket_receipt(env: &Env, raffle: &Raffle, recipient: &Address, ticket_id: u32, timestamp: u64) {
+    if let Some(nft_contract) = &raffle.nft_contract {
+        let raffle_id = env.current_contract_address();
+        NftTicketClient::new(env, nft_contract).mint(recipient, &ticket_id, &raffle_id);
+        TicketNftMinted {
+            recipient: recipient.clone(),
+            ticket_id,
+            raffle_id,
+            nft_contract: nft_contract.clone(),
+            timestamp,
+        }
+        .publish(env);
+    }
+}
+
 /// Submit a hash commitment for the [`RandomnessSource::CommitReveal`] path.
 ///
 /// In the commit-reveal scheme each ticket holder contributes entropy to the

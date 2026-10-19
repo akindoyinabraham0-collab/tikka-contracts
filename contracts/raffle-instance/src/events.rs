@@ -550,13 +550,12 @@ pub struct AdminChanged {
 /// Emitted once per NFT receipt is successfully minted
 /// by the configured `nft_contract`.
 ///
-/// Note: currently `#[allow(dead_code)]` — minting is performed by the
-/// external `nft_contract`, which is not called from this contract yet.
-#[allow(dead_code)]
+/// Published by both purchase paths; a failed mint rolls back the purchase
+/// and all its events.
 #[derive(Clone)]
 #[contractevent]
 pub struct TicketNftMinted {
-    /// The address that received the NFT (the ticket buyer).
+    /// The ticket owner receiving the NFT (the recipient for gift purchases).
     pub recipient: Address,
     /// The ticket ID within this raffle (1-indexed).
     pub ticket_id: u32,

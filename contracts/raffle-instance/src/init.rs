@@ -62,7 +62,8 @@ use crate::{
 /// | `protocol_fee_bp` | `≤ 10 000`; applied to ticket purchases and prize claims |
 /// | `oracle_address` | Required (and not self) when `randomness_source == External`; forbidden otherwise |
 /// | `metadata_hash` | Must not be the all-zero 32-byte value |
-/// | `category` | See [`validate_category`] |
+/// | `category` | Non-empty ASCII alphanumerics/hyphens, bounded length, normalized to lowercase |
+/// | `nft_contract` | Deployed Wasm contract other than self; at most 10 tickets per transaction |
 /// | `payment_token` | Must be a valid SAC (queried via `try_decimals`) |
 /// | `claim_lockup_seconds` | `≤ MAX_CLAIM_LOCKUP_SECONDS` (7 days) after `resolve_defaults` |
 /// | `claim_expiry_seconds` | `≥ MIN_CLAIM_EXPIRY_SECONDS` and greater than the claim lockup after `resolve_defaults` |
@@ -122,10 +123,15 @@ pub(crate) fn init(
     let swap_deadline = config
         .swap_deadline_seconds
         .unwrap_or(DEFAULT_SWAP_DEADLINE_SECONDS);
+    if let Some(ref prize_token) = config.prize_token {
+        crate::validate_token_address(&env, prize_token)?;
+    }
+    let prize_token = config.prize_token.clone().unwrap_or_else(|| config.payment_token.clone());
 
     let raffle = Raffle {
         creator: creator.clone(),
         description: config.description.clone(),
+        category: config.category.clone(),
         end_time: config.end_time,
         no_deadline: config.no_deadline,
         max_tickets: config.max_tickets,

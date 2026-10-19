@@ -35,9 +35,10 @@ pub struct CreatorProfile {
 
 ### Track Record
 
-- **Automatic**: `raffles_created` increments on every successful `create_raffle`
+- **Automatic**: The stored `raffles_created` counter increments in the shared creation path on every successful regular raffle creation or recurring round deployment. Registering a recurring schedule alone does not increment it.
 - **Immutable**: Cannot be manually adjusted, only incremented by contract
 - **Lifetime Count**: Total raffles ever created by this address
+- **Preserved**: Profile renames, verification changes, and old raffle cleanup preserve the counter. It is stored separately from the creator raffle index, which cleanup may prune.
 
 ## Usage
 
@@ -230,7 +231,7 @@ pub fn get_profile(
 Existing raffles created before this feature:
 - Creators will have `raffles_created = 0` initially
 - Historical count is not backfilled
-- Profile only increments on new raffles going forward
+- Profile only increments on new regular raffles and recurring round deployments going forward
 
 ## Future Enhancements
 

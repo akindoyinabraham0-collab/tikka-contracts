@@ -3,6 +3,79 @@
 use super::*;
 
 #[test]
+fn init_rejects_invalid_nft_targets_and_oversized_mint_batches() {
+    use super::tickets::TicketReceiptMock;
+
+    let (env, contract_id, factory, admin, creator, payment_token) = init_bounds_env();
+    let client = ContractClient::new(&env, &contract_id);
+    let nft = env.register(TicketReceiptMock, ());
+    let mut config = base_config(&env, &payment_token);
+    config.max_tickets_per_tx = raffle_shared::constants::MAX_NFT_TICKETS_PER_TX;
+    // Reject self, missing contracts, built-in tokens and account addresses.
+    let account = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    for target in [contract_id.clone(), Address::generate(&env), payment_token, account] {
+        config.nft_contract = Some(target);
+        assert_eq!(
+            client.try_init(&factory, &admin, &creator, &config),
+            Err(Ok(Error::InvalidParameters))
+        );
+        env.as_contract(&contract_id, || {
+            assert!(!env.storage().instance().has(&DataKey::Raffle));
+        });
+    }
+    let cap = raffle_shared::constants::MAX_NFT_TICKETS_PER_TX;
+    config.nft_contract = Some(nft.clone());
+    config.max_tickets = cap + 1;
+    config.max_tickets_per_tx = cap + 1;
+    assert_eq!(
+        client.try_init(&factory, &admin, &creator, &config),
+        Err(Ok(Error::InvalidParameters))
+    );
+    config.max_tickets_per_tx = cap;
+    client.init(&factory, &admin, &creator, &config);
+    assert_eq!(client.get_raffle().nft_contract, Some(nft));
+}
+
+#[test]
+fn init_persists_the_normalized_category() {
+    let (env, contract_id, factory, admin, creator, payment_token) = init_bounds_env();
+    let client = ContractClient::new(&env, &contract_id);
+    let mut config = base_config(&env, &payment_token);
+    config.category = Some(String::from_str(&env, "ArT-2026"));
+
+    client.init(&factory, &admin, &creator, &config);
+
+    assert_eq!(client.get_raffle().category, Some(String::from_str(&env, "art-2026")));
+}
+
+#[test]
+fn init_rejects_invalid_categories() {
+    let (env, contract_id, factory, admin, creator, payment_token) = init_bounds_env();
+    let client = ContractClient::new(&env, &contract_id);
+    let overlong = String::from_bytes(
+        &env,
+        &[b'a'; raffle_shared::constants::MAX_CATEGORY_LENGTH as usize + 1],
+    );
+    for category in [
+        overlong,
+        String::from_str(&env, ""),
+        String::from_str(&env, "game night"),
+        String::from_str(&env, "game_night"),
+        String::from_str(&env, "caf\u{00e9}"),
+    ] {
+        let mut config = base_config(&env, &payment_token);
+        config.category = Some(category);
+        assert_eq!(
+            client.try_init(&factory, &admin, &creator, &config),
+            Err(Ok(Error::InvalidParameters))
+        );
+    }
+}
+
+#[test]
 fn test_init_claim_lockup_seconds_at_bound_succeeds() {
     let (env, contract_id, factory, admin, creator, payment_token) = init_bounds_env();
     let client = ContractClient::new(&env, &contract_id);

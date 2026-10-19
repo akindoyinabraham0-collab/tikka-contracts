@@ -23,6 +23,7 @@ fn test_raffle(env: &Env, weights: &[u32], prize_amount: i128) -> Raffle {
     Raffle {
         creator: Address::generate(env),
         description: String::from_str(env, "tier invariant"),
+        category: None,
         end_time: 0,
         no_deadline: true,
         max_tickets: 1,
@@ -39,7 +40,6 @@ fn test_raffle(env: &Env, weights: &[u32], prize_amount: i128) -> Raffle {
         status: RaffleStatus::PendingPrize,
         prize_deposited: false,
         winners: Vec::new(env),
-        bundles: Vec::new(env),
         randomness_source: raffle_shared::RandomnessSource::Internal,
         oracle_address: None,
         oracle_public_key: None,
@@ -618,6 +618,7 @@ fn test_entrypoints_reject_every_prohibited_status() {
     let raffle = Raffle {
         creator: creator.clone(),
         description: String::from_str(&env, "status test"),
+        category: None,
         end_time: 0,
         no_deadline: true,
         max_tickets: 10,
@@ -636,6 +637,7 @@ fn test_entrypoints_reject_every_prohibited_status() {
         winners: soroban_sdk::Vec::new(&env),
         randomness_source: raffle_shared::RandomnessSource::Internal,
         oracle_address: None,
+        oracle_public_key: None,
         protocol_fee_bp: 0,
         treasury_address: None,
         swap_router: None,

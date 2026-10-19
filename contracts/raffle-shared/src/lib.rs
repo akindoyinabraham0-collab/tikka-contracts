@@ -261,10 +261,12 @@ pub struct RaffleConfig {
     /// The discount amount specified in basis points.
     pub early_bird_discount_bp: u32,
     /// Optional on-chain category/tag used for frontend filtering (e.g. "gaming",
-    /// "charity", "art"). When set it must be at most `MAX_CATEGORY_LENGTH` bytes
-    /// and contain only ASCII alphanumerics and hyphens. Validated in the raffle
-    /// instance's `init`; the factory maintains a per-category index so clients
-    /// can query raffles by category without an off-chain indexer. See #439.
+    /// "charity", "art"). When set it must be nonempty, at most
+    /// `MAX_CATEGORY_LENGTH` bytes, and contain only ASCII alphanumerics and
+    /// hyphens. Shared validation normalizes it to ASCII lowercase. The factory
+    /// validates before deployment and indexing; instance initialization also
+    /// validates and stores the canonical category returned by `get_raffle`.
+    /// The per-category factory index supports queries without an off-chain indexer.
     pub category: Option<String>,
     /// When true, each address may win at most one prize tier (#485).
     pub unique_winners: bool,
@@ -274,7 +276,10 @@ pub struct RaffleConfig {
     /// defaults to `payment_token`. When provided, prizes are deposited and
     /// paid out in this token instead.
     pub prize_token: Option<Address>,
-    /// Optional NFT contract for ticket receipts.
+    /// Optional deployed Wasm contract implementing `NftTicketTrait` for ticket
+    /// receipts. Initialization rejects self/non-contract addresses and requires
+    /// `max_tickets_per_tx <= MAX_NFT_TICKETS_PER_TX` (10). Each purchased ticket
+    /// mints one receipt; mint failure rolls back payment and ticket issuance.
     pub nft_contract: Option<Address>,
 }
 
@@ -536,13 +541,13 @@ pub trait RandomnessReceiverTrait {
 ///
 /// The raffle-instance calls `mint` on this contract immediately after a
 /// successful ticket purchase.  The NFT contract is responsible for its own
-/// authorisation model; the raffle-instance supplies the raffle's own address
-/// as the `minter` so the NFT contract can restrict minting to known raffle
-/// contracts.
+/// authorisation model; `raffle_id` is the raffle's own address and is also the
+/// immediate invoker of `mint`, so `raffle_id.require_auth()` can restrict
+/// minting to the calling raffle.
 ///
 /// Parameters
 /// ----------
-/// * `recipient`  – the address that receives the NFT (the ticket buyer).
+/// * `recipient`  – the ticket owner, including the recipient of a gift purchase.
 /// * `ticket_id`  – the unique ticket ID within this raffle (1-indexed, u32).
 /// * `raffle_id`  – the raffle instance contract address, used as a namespace
 ///   so a single NFT contract can serve multiple raffles.

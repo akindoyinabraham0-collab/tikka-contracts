@@ -2,6 +2,185 @@
 
 use super::*;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[soroban_sdk::contracttype]
+pub struct ReceiptMint {
+    pub recipient: Address,
+    pub ticket_id: u32,
+    pub raffle_id: Address,
+}
+
+#[soroban_sdk::contracttype]
+enum ReceiptKey {
+    Calls,
+    FailOn,
+}
+
+#[contract]
+pub struct TicketReceiptMock;
+
+#[contractimpl]
+impl TicketReceiptMock {
+    pub fn fail_on(env: Env, ticket_id: u32) {
+        env.storage().instance().set(&ReceiptKey::FailOn, &ticket_id);
+    }
+
+    pub fn calls(env: Env) -> Vec<ReceiptMint> {
+        env.storage().instance().get(&ReceiptKey::Calls).unwrap_or(Vec::new(&env))
+    }
+
+    pub fn mint(env: Env, recipient: Address, ticket_id: u32, raffle_id: Address) {
+        raffle_id.require_auth();
+        let fail_on: u32 = env.storage().instance().get(&ReceiptKey::FailOn).unwrap_or(0);
+        assert_ne!(ticket_id, fail_on, "receipt mint rejected");
+        let mut calls = Self::calls(env.clone());
+        calls.push_back(ReceiptMint { recipient, ticket_id, raffle_id });
+        env.storage().instance().set(&ReceiptKey::Calls, &calls);
+    }
+}
+
+fn receipt_raffle(env: &Env, enabled: bool) -> (Address, Address, Address, Address, Address) {
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+    let raffle_id = env.register(Contract, ());
+    let factory = env.register(MockFactory, ());
+    let nft_id = env.register(TicketReceiptMock, ());
+    let creator = Address::generate(env);
+    let buyer = Address::generate(env);
+    let recipient = Address::generate(env);
+    let (payment_token, token) = create_token(env, &Address::generate(env));
+    token.mint(&creator, &1_000_000);
+    token.mint(&buyer, &1_000_000);
+    let mut config = base_config(env, &payment_token);
+    config.max_tickets = 20;
+    config.max_tickets_per_tx = raffle_shared::constants::MAX_NFT_TICKETS_PER_TX;
+    config.prize_amount = MIN_TICKET_PRICE * 20;
+    config.protocol_fee_bp = 100;
+    config.treasury_address = Some(Address::generate(env));
+    config.nft_contract = if enabled { Some(nft_id.clone()) } else { None };
+    let client = ContractClient::new(env, &raffle_id);
+    client.init(&factory, &Address::generate(env), &creator, &config);
+    client.deposit_prize();
+    (raffle_id, nft_id, buyer, recipient, payment_token)
+}
+
+#[test]
+fn purchases_mint_receipts_for_each_ticket_and_emit_matching_events() {
+    use soroban_sdk::{IntoVal, Map, Symbol, Val};
+
+    let env = Env::default();
+    let (raffle_id, nft_id, buyer, recipient, _) = receipt_raffle(&env, true);
+    let client = ContractClient::new(&env, &raffle_id);
+    client.buy_tickets(&buyer, &2);
+    client.buy_tickets_for(&buyer, &recipient, &2);
+
+    let calls = TicketReceiptMockClient::new(&env, &nft_id).calls();
+    assert_eq!(calls.len(), 4);
+    let mut receipts = 0;
+    for (emitter, topics, data) in env.events().all().iter() {
+        if emitter != raffle_id
+            || topics != soroban_sdk::vec![&env, Symbol::new(&env, "ticket_nft_minted").into_val(&env)]
+        {
+            continue;
+        }
+        let ticket_id = receipts + 1;
+        let owner = if ticket_id <= 2 { &buyer } else { &recipient };
+        assert_eq!(calls.get(receipts).unwrap(), ReceiptMint {
+            recipient: owner.clone(), ticket_id, raffle_id: raffle_id.clone(),
+        });
+        let expected: Map<Symbol, Val> = Map::from_array(&env, [
+            (Symbol::new(&env, "recipient"), owner.into_val(&env)),
+            (Symbol::new(&env, "ticket_id"), ticket_id.into_val(&env)),
+            (Symbol::new(&env, "raffle_id"), raffle_id.into_val(&env)),
+            (Symbol::new(&env, "nft_contract"), nft_id.into_val(&env)),
+            (Symbol::new(&env, "timestamp"), 1_000u64.into_val(&env)),
+        ]);
+        assert_eq!(data, expected.into_val(&env));
+        receipts += 1;
+    }
+    assert_eq!(receipts, 4);
+}
+
+#[test]
+fn failing_second_receipt_rolls_back_payment_tickets_fees_mints_and_events() {
+    for gift in [false, true] {
+        let env = Env::default();
+        let (raffle_id, nft_id, buyer, recipient, payment_token) = receipt_raffle(&env, true);
+        let client = ContractClient::new(&env, &raffle_id);
+        let nft = TicketReceiptMockClient::new(&env, &nft_id);
+        nft.fail_on(&2);
+        let token = soroban_sdk::token::Client::new(&env, &payment_token);
+        let buyer_balance = token.balance(&buyer);
+        let raffle_balance = token.balance(&raffle_id);
+        let events_before = env.events().all();
+        if gift {
+            assert!(client.try_buy_tickets_for(&buyer, &recipient, &2).is_err());
+        } else {
+            assert!(client.try_buy_tickets(&buyer, &2).is_err());
+        }
+        assert_eq!(client.get_raffle().tickets_sold, 0);
+        assert_eq!(token.balance(&buyer), buyer_balance);
+        assert_eq!(token.balance(&raffle_id), raffle_balance);
+        assert_eq!(nft.calls().len(), 0);
+        assert_eq!(env.events().all(), events_before);
+        env.as_contract(&raffle_id, || {
+            assert!(!env.storage().persistent().has(&DataKey::Ticket(1)));
+            assert!(!env.storage().persistent().has(&DataKey::Ticket(2)));
+            assert!(!env.storage().persistent().has(&DataKey::TicketCount(buyer.clone())));
+            assert!(!env.storage().persistent().has(&DataKey::TicketCount(recipient.clone())));
+            assert!(!env.storage().persistent().has(&DataKey::TicketBuyers));
+            assert_eq!(env.storage().instance().get::<_, i128>(&DataKey::AccumulatedFees).unwrap_or(0), 0);
+        });
+        // The guard and ticket sequence also recover after an aborted purchase.
+        nft.fail_on(&0);
+        assert_eq!(client.buy_tickets(&buyer, &1), 1);
+    }
+}
+
+#[test]
+fn no_nft_configured_does_not_call_receipt_contract() {
+    let env = Env::default();
+    let (raffle_id, nft_id, buyer, recipient, _) = receipt_raffle(&env, false);
+    let nft = TicketReceiptMockClient::new(&env, &nft_id);
+    nft.fail_on(&1);
+    let client = ContractClient::new(&env, &raffle_id);
+    assert_eq!(client.buy_tickets(&buyer, &1), 1);
+    assert_eq!(client.buy_tickets_for(&buyer, &recipient, &1), 2);
+    assert_eq!(nft.calls().len(), 0);
+}
+
+#[test]
+fn nft_batch_at_cap_fits_default_budget_and_larger_batches_are_rejected() {
+    for gift in [false, true] {
+        let env = Env::default();
+        let (raffle_id, nft_id, buyer, recipient, _) = receipt_raffle(&env, true);
+        let client = ContractClient::new(&env, &raffle_id);
+        let cap = raffle_shared::constants::MAX_NFT_TICKETS_PER_TX;
+        // Also exercise the runtime cap for previously initialized instances
+        // whose stored per-transaction limit predates NFT minting support.
+        env.as_contract(&raffle_id, || {
+            let mut raffle = crate::read_raffle(&env).unwrap();
+            raffle.max_tickets_per_tx = cap + 1;
+            crate::write_raffle(&env, &raffle);
+        });
+        if gift {
+            assert_eq!(client.try_buy_tickets_for(&buyer, &recipient, &(cap + 1)), Err(Ok(Error::ExceedsMaxTicketsPerTx)));
+        } else {
+            assert_eq!(client.try_buy_tickets(&buyer, &(cap + 1)), Err(Ok(Error::ExceedsMaxTicketsPerTx)));
+        }
+        env.cost_estimate().budget().reset_default();
+        if gift {
+            assert_eq!(client.buy_tickets_for(&buyer, &recipient, &cap), cap);
+        } else {
+            assert_eq!(client.buy_tickets(&buyer, &cap), cap);
+        }
+        let budget = env.cost_estimate().budget();
+        assert!(budget.cpu_instruction_cost() < 100_000_000);
+        assert!(budget.memory_bytes_cost() < 40 * 1024 * 1024);
+        assert_eq!(TicketReceiptMockClient::new(&env, &nft_id).calls().len(), cap);
+    }
+}
+
 #[test]
 fn ticket_number_matches_monotonic_id() {
     let env = Env::default();

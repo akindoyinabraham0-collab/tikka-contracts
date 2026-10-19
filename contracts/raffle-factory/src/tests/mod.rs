@@ -212,6 +212,7 @@ pub fn valid_base_config(env: &Env, payment_token: &Address) -> RaffleConfig {
 }
 
 pub mod budget;
+pub mod category;
 pub mod governance;
 pub mod init;
 pub mod pagination;
